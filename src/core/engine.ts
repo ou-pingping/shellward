@@ -9,13 +9,15 @@ import { randomBytes } from 'crypto'
 import { resolve } from 'path'
 import { homedir } from 'os'
 import { DANGEROUS_COMMANDS, splitCommands } from '../rules/dangerous-commands.js'
+import { TOOL_POISONING_RULES } from '../rules/tool-poisoning.js'
 import { PROTECTED_PATHS } from '../rules/protected-paths.js'
 import { INJECTION_RULES_ZH } from '../rules/injection-zh.js'
 import { INJECTION_RULES_EN } from '../rules/injection-en.js'
-import { redactSensitive } from '../rules/sensitive-patterns.js'
+import { redactSensitive, compileSensitivePatterns } from '../rules/sensitive-patterns.js'
+import type { SensitivePattern } from '../rules/sensitive-patterns.js'
 import { AuditLog } from '../audit-log.js'
 import { resolveLocale, DEFAULT_CONFIG } from '../types.js'
-import type { ShellWardConfig, ResolvedLocale, InjectionRule } from '../types.js'
+import type { ShellWardConfig, ResolvedLocale, InjectionRule, DangerousCommandRule } from '../types.js'
 
 // ===== Result Types =====
 
@@ -45,6 +47,30 @@ export interface ResponseCheckResult {
   sensitiveData: ScanResult
 }
 
+/** Shape of an MCP tool definition (subset of the spec we inspect). */
+export interface McpToolDefinition {
+  name: string
+  description?: string
+  inputSchema?: Record<string, any>
+}
+
+export interface ToolPoisoningFinding {
+  id: string
+  name: string
+  category: string
+  score: number
+  source: 'description' | 'parameter' | 'hidden_chars'
+}
+
+export interface ToolPoisoningResult {
+  toolName: string
+  safe: boolean
+  score: number
+  threshold: number
+  findings: ToolPoisoningFinding[]
+  hiddenChars: number
+}
+
 // ===== Internal Types =====
 
 interface CompiledRule extends InjectionRule {
@@ -68,6 +94,7 @@ const EXEC_TOOLS = new Set([
 
 const OUTBOUND_TOOLS = new Set([
   'send_email', 'send_message', 'post_tweet', 'message', 'sessions_send',
+  'http_post', 'curl_post',
 ])
 
 const DUAL_USE_TOOLS = new Set([
@@ -105,6 +132,12 @@ const HIDDEN_CHAR_RANGES: [number, number, string][] = [
   [0xFEFF, 0xFEFF, 'BOM/Zero-width no-break'],
   [0x00AD, 0x00AD, 'Soft hyphen'],
   [0xFFF9, 0xFFFB, 'Interlinear annotation'],
+  // Variation selectors — abused to smuggle hidden bytes/instructions
+  [0xFE00, 0xFE0F, 'Variation selector'],
+  [0xE0100, 0xE01EF, 'Variation selector supplement'],
+  // Unicode Tag characters — the primary "invisible prompt injection" vector
+  [0xE0001, 0xE0001, 'Language tag'],
+  [0xE0020, 0xE007F, 'Tag character'],
 ]
 
 const TEXT_FIELDS = [
@@ -165,6 +198,15 @@ export class ShellWard {
   private _canaryToken: string
   private compiledRules: CompiledRule[]
 
+  // Tool policy sets — built-ins merged with config.customRules (allowedTools wins).
+  private readonly blockedTools: Set<string>
+  private readonly allowedTools: Set<string>
+  private readonly sensitiveTools: Set<string>
+  private readonly outboundTools: Set<string>
+  private readonly honeypots: RegExp[]
+  private readonly customSensitive: SensitivePattern[]
+  private readonly customDangerous: DangerousCommandRule[]
+
   private sensitiveReads: Map<string, { path: string; ts: number }> = new Map()
   private readonly TRACKING_WINDOW_MS = 5 * 60 * 1000
   private readonly MAX_TRACKED_READS = 500
@@ -175,11 +217,26 @@ export class ShellWard {
     this.log = new AuditLog(this.config)
     this._canaryToken = 'SW-' + randomBytes(8).toString('hex')
 
-    const allRules = [...INJECTION_RULES_ZH, ...INJECTION_RULES_EN]
-    this.compiledRules = allRules.map(rule => ({
-      ...rule,
-      compiled: new RegExp(rule.pattern, rule.flags || 'i'),
-    }))
+    const custom = this.config.customRules || {}
+    const lower = (s: string) => s.toLowerCase()
+
+    this.allowedTools = new Set((custom.allowedTools || []).map(lower))
+    this.blockedTools = new Set([...BLOCKED_TOOLS, ...(custom.blockedTools || []).map(lower)])
+    this.sensitiveTools = new Set([...SENSITIVE_TOOLS, ...(custom.sensitiveTools || []).map(lower)])
+    this.outboundTools = new Set([...OUTBOUND_TOOLS, ...(custom.outboundTools || []).map(lower)])
+    // allowedTools always wins — strip them from the block/sensitive sets.
+    for (const t of this.allowedTools) { this.blockedTools.delete(t); this.sensitiveTools.delete(t) }
+
+    this.honeypots = [...HONEYPOT_PATTERNS, ...compileRegexList(custom.honeypotPaths || [])]
+    this.customSensitive = compileSensitivePatterns(custom.sensitivePatterns || [])
+    this.customDangerous = compileDangerousRules(custom.dangerousCommands || [])
+
+    const allRules = [...INJECTION_RULES_ZH, ...INJECTION_RULES_EN, ...(custom.injectionRules || [])]
+    this.compiledRules = allRules
+      .map(rule => {
+        try { return { ...rule, compiled: new RegExp(rule.pattern, rule.flags || 'i') } } catch { return null }
+      })
+      .filter((r): r is CompiledRule => r !== null)
   }
 
   // ========== L1: Prompt Guard ==========
@@ -199,7 +256,7 @@ export class ShellWard {
   // ========== L2: Data Scanner ==========
 
   scanData(text: string, toolName?: string): ScanResult {
-    const [, findings] = redactSensitive(text)
+    const [, findings] = redactSensitive(text, this.customSensitive)
     const hasSensitiveData = findings.length > 0
     const summary = findings.map(f => `${f.name}(${f.count})`).join(', ')
 
@@ -228,7 +285,10 @@ export class ShellWard {
     const toolLower = toolName.toLowerCase()
     const enforce = this.config.mode === 'enforce'
 
-    if (BLOCKED_TOOLS.has(toolLower)) {
+    // allowedTools always wins — user-trusted tools bypass policy.
+    if (this.allowedTools.has(toolLower)) return { allowed: true }
+
+    if (this.blockedTools.has(toolLower)) {
       const reason = this.locale === 'zh'
         ? `安全策略禁止自动执行: ${toolName}`
         : `Blocked by security policy: ${toolName}`
@@ -242,7 +302,7 @@ export class ShellWard {
       return { allowed: false, level: 'CRITICAL', reason }
     }
 
-    if (SENSITIVE_TOOLS.has(toolLower)) {
+    if (this.sensitiveTools.has(toolLower)) {
       this.log.write({
         level: 'MEDIUM',
         layer: 'L3',
@@ -260,8 +320,12 @@ export class ShellWard {
     const parts = splitCommands(cmd)
 
     for (const part of parts) {
-      for (const rule of DANGEROUS_COMMANDS) {
-        if (rule.pattern.test(part)) {
+      // Normalize shell-quote obfuscation (e.g. r''m / r""m → rm) before matching.
+      // Only empty quote pairs are stripped, so a real quoted arg like
+      // echo "rm -rf /" is untouched (no false positive).
+      const normalized = normalizeCommand(part)
+      for (const rule of [...DANGEROUS_COMMANDS, ...this.customDangerous]) {
+        if (rule.pattern.test(part) || rule.pattern.test(normalized)) {
           const desc = this.locale === 'zh' ? rule.description_zh : rule.description_en
           const reason = this.locale === 'zh'
             ? `检测到危险命令: ${truncate(part, 80)}\n原因: ${desc}`
@@ -321,10 +385,14 @@ export class ShellWard {
       })
     }
 
+    // Strip invisible characters before rule matching so an attacker can't break
+    // a pattern by interleaving zero-width spaces (e.g. "ig​nore previous").
+    const normText = hiddenChars.length > 0 ? stripInvisible(text) : text
+
     let score = 0
     const matched: { id: string; name: string; score: number }[] = []
     for (const rule of this.compiledRules) {
-      if (rule.compiled.test(text)) {
+      if (rule.compiled.test(text) || (normText !== text && rule.compiled.test(normText))) {
         score += rule.riskScore
         matched.push({ id: rule.id, name: rule.name, score: rule.riskScore })
       }
@@ -346,10 +414,94 @@ export class ShellWard {
   }
 
   getInjectionThreshold(toolName?: string): number {
-    if (toolName && LOW_RISK_TOOLS.has(toolName.toLowerCase())) {
+    const lower = toolName?.toLowerCase()
+    if (lower && (LOW_RISK_TOOLS.has(lower) || this.allowedTools.has(lower))) {
       return Math.max(this.config.injectionThreshold, 80)
     }
     return this.config.injectionThreshold
+  }
+
+  // ========== L4b: MCP Tool-Poisoning Scanner ==========
+  //
+  // Inspects an MCP tool *definition* (not user input) for instructions hidden
+  // in its description / parameter descriptions — the "tool poisoning" attack.
+  // Reuses the injection engine + hidden-char detection and layers on rules
+  // tuned for tool-metadata attacks. Pure & side-effect-light: callable from
+  // the SDK, the MCP server, or at plugin tool-discovery time.
+
+  scanToolDefinition(tool: McpToolDefinition, options?: { threshold?: number }): ToolPoisoningResult {
+    const threshold = options?.threshold ?? 40
+    const findings: ToolPoisoningFinding[] = []
+    let score = 0
+
+    const description = typeof tool.description === 'string' ? tool.description : ''
+    const paramText = collectSchemaText(tool.inputSchema)
+    const combined = `${description}\n${paramText}`
+
+    // 1. Hidden / invisible characters anywhere in the metadata
+    const hidden = detectHiddenChars(combined)
+    if (hidden.length > 0) {
+      const s = hidden.length > 3 ? 35 : 20
+      score += s
+      findings.push({
+        id: 'tp_hidden_chars',
+        name: `Hidden characters in tool metadata (${[...new Set(hidden.map(h => h.name))].join(', ')})`,
+        category: 'concealment',
+        score: s,
+        source: 'hidden_chars',
+      })
+    }
+
+    // 2. Tool-poisoning specific rules (description + parameters)
+    for (const rule of TOOL_POISONING_RULES) {
+      const inDesc = rule.pattern.test(description)
+      const inParam = !inDesc && rule.pattern.test(paramText)
+      if (inDesc || inParam) {
+        score += rule.riskScore
+        findings.push({
+          id: rule.id,
+          name: rule.name,
+          category: rule.category,
+          score: rule.riskScore,
+          source: inDesc ? 'description' : 'parameter',
+        })
+      }
+    }
+
+    // 3. Generic prompt-injection patterns reused on the description
+    for (const rule of this.compiledRules) {
+      if (rule.compiled.test(combined)) {
+        score += rule.riskScore
+        findings.push({
+          id: rule.id,
+          name: rule.name,
+          category: rule.category,
+          score: rule.riskScore,
+          source: 'description',
+        })
+      }
+    }
+
+    const safe = score < threshold
+    if (!safe) {
+      this.log.write({
+        level: score >= 80 ? 'CRITICAL' : 'HIGH',
+        layer: 'L4',
+        action: this.config.mode === 'enforce' ? 'block' : 'detect',
+        detail: this.locale === 'zh'
+          ? `检测到 MCP 工具投毒: ${tool.name}\n风险评分: ${score}\n命中: ${findings.map(f => f.name).join('; ')}`
+          : `MCP tool poisoning detected: ${tool.name}\nRisk score: ${score}\nMatched: ${findings.map(f => f.name).join('; ')}`,
+        tool: tool.name,
+        pattern: 'tool_poisoning',
+      })
+    }
+
+    return { toolName: tool.name, safe, score, threshold, findings, hiddenChars: hidden.length }
+  }
+
+  /** Scan a list of MCP tool definitions; returns only the unsafe ones. */
+  scanToolDefinitions(tools: McpToolDefinition[], options?: { threshold?: number }): ToolPoisoningResult[] {
+    return tools.map(t => this.scanToolDefinition(t, options)).filter(r => !r.safe)
   }
 
   // ========== L5: Security Gate ==========
@@ -377,20 +529,13 @@ export class ShellWard {
       return { allowed: false, level: 'CRITICAL', reason, ruleId: 'no_payment' }
     }
 
-    // Block outbound actions when sensitive data was recently accessed (DLP via Gate)
-    const outboundActions = ['send_email', 'send_message', 'post_tweet', 'http_post', 'curl_post']
-    if (outboundActions.includes(action) && this.hasSensitiveData) {
-      const reason = this.locale === 'zh'
-        ? `数据外泄拦截: 近期访问了敏感数据，禁止通过 ${action} 向外部发送`
-        : `Data exfiltration blocked: sensitive data recently accessed, ${action} denied`
-      this.log.write({
-        level: 'CRITICAL',
-        layer: 'L5',
-        action: 'block',
-        detail: `Gate denied (DLP): ${action}`,
-        pattern: 'gate_data_exfil',
-      })
-      return { allowed: false, level: 'CRITICAL', reason, ruleId: 'gate_data_exfil' }
+    // Outbound actions: delegate the DLP decision to the canonical data-flow
+    // guard (L7) so the Gate and the Outbound Guard can never diverge. The set
+    // of outbound tools (incl. http_post/curl_post + any customRules) lives in
+    // one place: this.outboundTools, consulted by checkOutbound.
+    if (this.outboundTools.has(action.toLowerCase())) {
+      const dlp = this.checkOutbound(action, details ? { body: details } : {})
+      if (!dlp.allowed) return dlp
     }
 
     this.log.write({
@@ -419,7 +564,7 @@ export class ShellWard {
       })
     }
 
-    const [, findings] = redactSensitive(content)
+    const [, findings] = redactSensitive(content, this.customSensitive)
     const hasSensitiveData = findings.length > 0
     const summary = findings.map(f => `${f.name}(${f.count})`).join(', ')
 
@@ -455,7 +600,7 @@ export class ShellWard {
   }
 
   trackFileRead(toolName: string, path: string): void {
-    for (const hp of HONEYPOT_PATTERNS) {
+    for (const hp of this.honeypots) {
       if (hp.test(path)) {
         this.log.write({
           level: 'CRITICAL',
@@ -494,7 +639,7 @@ export class ShellWard {
 
   checkOutbound(toolName: string, params: Record<string, any>): CheckResult {
     const toolLower = toolName.toLowerCase()
-    const isOutbound = OUTBOUND_TOOLS.has(toolLower)
+    const isOutbound = this.outboundTools.has(toolLower)
     const isDualUse = DUAL_USE_TOOLS.has(toolLower)
     const enforce = this.config.mode === 'enforce'
 
@@ -656,7 +801,33 @@ function mergeConfig(userConfig?: Partial<ShellWardConfig>): ShellWardConfig {
     injectionThreshold: threshold,
     autoCheckOnStartup,
     layers: { ...DEFAULT_CONFIG.layers, ...(userConfig.layers || {}) },
+    ...(userConfig.customRules ? { customRules: userConfig.customRules } : {}),
   }
+}
+
+/** Compile a list of regex-source strings; invalid ones are skipped. */
+function compileRegexList(sources: string[]): RegExp[] {
+  const out: RegExp[] = []
+  for (const src of sources) {
+    try { out.push(new RegExp(src, 'i')) } catch { /* skip invalid */ }
+  }
+  return out
+}
+
+/** Compile user dangerous-command rules; invalid regexes are skipped. */
+function compileDangerousRules(rules: { id: string; pattern: string; flags?: string; description?: string }[]): DangerousCommandRule[] {
+  const out: DangerousCommandRule[] = []
+  for (const r of rules) {
+    try {
+      out.push({
+        id: r.id,
+        pattern: new RegExp(r.pattern, r.flags || 'i'),
+        description_zh: r.description || r.id,
+        description_en: r.description || r.id,
+      })
+    } catch { /* skip invalid */ }
+  }
+  return out
 }
 
 function normalizePath(p: string): string {
@@ -668,6 +839,54 @@ function normalizePath(p: string): string {
 
 function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + '...' : s
+}
+
+/**
+ * Defeat shell-quote obfuscation for DETECTION (not execution): strip empty
+ * quote pairs so `r''m -rf /` and `r""m -rf /` normalize to `rm -rf /`.
+ * Deliberately conservative — non-empty quoted arguments (echo "rm -rf /")
+ * are left intact to avoid false positives. Runs a few passes for r''''m.
+ */
+function normalizeCommand(cmd: string): string {
+  let prev = cmd
+  for (let i = 0; i < 4; i++) {
+    const next = prev.replace(/''|""/g, '')
+    if (next === prev) break
+    prev = next
+  }
+  return prev
+}
+
+/**
+ * Recursively collect all `description`/`title` string values out of a JSON
+ * Schema (an MCP tool's inputSchema), so poisoning hidden in a nested
+ * parameter description is scanned too. Bounded to avoid pathological schemas.
+ */
+function collectSchemaText(schema: unknown, depth = 0): string {
+  if (!schema || typeof schema !== 'object' || depth > 6) return ''
+  const out: string[] = []
+  for (const [key, val] of Object.entries(schema as Record<string, unknown>)) {
+    if ((key === 'description' || key === 'title') && typeof val === 'string') {
+      out.push(val)
+    } else if (val && typeof val === 'object') {
+      out.push(collectSchemaText(val, depth + 1))
+    }
+  }
+  return out.join('\n')
+}
+
+/** Remove all invisible/zero-width characters (the HIDDEN_CHAR_RANGES). */
+function stripInvisible(text: string): string {
+  let out = ''
+  for (const char of text) {
+    const cp = char.codePointAt(0)!
+    let hidden = false
+    for (const [start, end] of HIDDEN_CHAR_RANGES) {
+      if (cp >= start && cp <= end) { hidden = true; break }
+    }
+    if (!hidden) out += char
+  }
+  return out
 }
 
 function detectHiddenChars(text: string): { char: string; codePoint: number; name: string }[] {

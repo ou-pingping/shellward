@@ -6,10 +6,12 @@ import { registerSecurityCommand } from './security.js'
 import { registerAuditCommand } from './audit.js'
 import { registerHardenCommand } from './harden.js'
 import { registerScanPluginsCommand } from './scan-plugins.js'
+import { registerScanMcpCommand } from './scan-mcp.js'
 import { registerCheckUpdatesCommand } from './check-updates.js'
 import { registerUpgradeOpenClawCommand } from './upgrade-openclaw.js'
 
-export function registerAllCommands(api: any, config: ShellWardConfig) {
+/** @returns number of registered commands (for the startup log). */
+export function registerAllCommands(api: any, config: ShellWardConfig): number {
   const locale = resolveLocale(config)
 
   // Register individual commands
@@ -17,6 +19,7 @@ export function registerAllCommands(api: any, config: ShellWardConfig) {
   registerAuditCommand(api, config)
   registerHardenCommand(api, config)
   registerScanPluginsCommand(api, config)
+  registerScanMcpCommand(api, config)
   registerCheckUpdatesCommand(api, config)
   registerUpgradeOpenClawCommand(api, config)
 
@@ -36,6 +39,7 @@ export function registerAllCommands(api: any, config: ShellWardConfig) {
 | \`/audit [数量] [过滤]\` | 查看审计日志 (过滤: block/audit/critical/high) |
 | \`/harden\` | 安全扫描 · \`/harden fix\` 自动修复权限 |
 | \`/scan-plugins\` | 扫描已安装插件的安全风险 |
+| \`/scan-mcp\` | 扫描已配置 MCP 服务器（工具投毒 + rug-pull） |
 | \`/check-updates\` | 检查 OpenClaw 版本和已知漏洞 |
 | \`/upgrade-openclaw\` | 一键升级 OpenClaw · \`/upgrade-openclaw yes\` 直接执行 |
 
@@ -50,6 +54,7 @@ L5 安全门 · L6 回复审计 · L7 数据流监控 · L8 会话安全`
 | \`/audit [count] [filter]\` | View audit log (filter: block/audit/critical/high) |
 | \`/harden\` | Security scan · \`/harden fix\` to auto-fix permissions |
 | \`/scan-plugins\` | Scan installed plugins for security risks |
+| \`/scan-mcp\` | Scan configured MCP servers (tool poisoning + rug-pull) |
 | \`/check-updates\` | Check OpenClaw version and known vulnerabilities |
 | \`/upgrade-openclaw\` | Upgrade OpenClaw · \`/upgrade-openclaw yes\` to execute |
 
@@ -58,4 +63,7 @@ L1 Prompt Guard · L2 Output Scanner · L3 Tool Blocker · L4 Input Auditor
 L5 Security Gate · L6 Outbound Guard · L7 Data Flow Guard · L8 Session Guard`,
     }),
   })
+
+  // 7 individual commands + /cg help
+  return 8
 }

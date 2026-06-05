@@ -2,22 +2,26 @@
 // src/mcp-server.ts — ShellWard MCP Server
 //
 // Exposes ShellWard's 8-layer security engine as an MCP server.
-// Zero dependencies — implements MCP protocol over stdio natively.
+// Zero dependencies — implements MCP protocol over stdio (newline-delimited JSON).
 //
-// Usage:
-//   npx tsx src/mcp-server.ts
+// Run (production, after `npm run build` or `npm i -g shellward`):
+//   shellward-mcp           # via the published bin
+//   node dist/mcp-server.js # direct
+//
+// Run (development, from source):
+//   npm run mcp             # npx tsx src/mcp-server.ts
 //
 // MCP config (claude_desktop_config.json / openclaw settings):
 //   {
 //     "mcpServers": {
 //       "shellward": {
-//         "command": "npx",
-//         "args": ["tsx", "/path/to/shellward/src/mcp-server.ts"]
+//         "command": "shellward-mcp"
 //       }
 //     }
 //   }
 
 import { ShellWard } from './core/engine.js'
+import { McpBaseline } from './mcp-baseline.js'
 import { readFileSync } from 'fs'
 import { createInterface } from 'readline'
 import { fileURLToPath } from 'url'
@@ -58,8 +62,12 @@ const guard = new ShellWard({
     dataFlowGuard: true,
     sessionGuard: true,
   },
-  injectionThreshold: Number(process.env.SHELLWARD_THRESHOLD) || 60,
+  injectionThreshold: Number(process.env.SHELLWARD_THRESHOLD) || 40,
 })
+
+// Rug-pull baseline store (lazy-persisted; only used when a `server` is supplied).
+// SHELLWARD_BASELINE_PATH relocates the store (tests/sandboxes use a temp file).
+const baseline = new McpBaseline(process.env.SHELLWARD_BASELINE_PATH || undefined)
 
 // ===== Tool Definitions =====
 
@@ -77,12 +85,12 @@ const TOOLS = [
   },
   {
     name: 'check_injection',
-    description: 'Detect prompt injection attempts in text. Supports 32+ rules for Chinese and English, with hidden character detection.',
+    description: 'Detect prompt injection attempts in text. Supports 37+ rules for Chinese and English, with hidden character detection.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         text: { type: 'string', description: 'Text to scan for injection attempts' },
-        threshold: { type: 'number', description: 'Detection threshold 0-100 (default: 60, lower = stricter)' },
+        threshold: { type: 'number', description: 'Detection threshold 0-100 (default: 40, lower = stricter)' },
       },
       required: ['text'],
     },
@@ -130,6 +138,21 @@ const TOOLS = [
         content: { type: 'string', description: 'Response content to check' },
       },
       required: ['content'],
+    },
+  },
+  {
+    name: 'scan_mcp_tool',
+    description: 'Scan an MCP tool definition for tool-poisoning (hidden/invisible-character instructions, concealment directives, sensitive-file access, exfiltration hints) AND rug-pull (description silently changed since first seen). Pass a tool as { name, description, inputSchema }; provide "server" to enable rug-pull baselining.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Tool name' },
+        description: { type: 'string', description: 'Tool description to scan' },
+        inputSchema: { type: 'object', description: 'Tool JSON Schema (optional) — nested parameter descriptions are scanned too' },
+        server: { type: 'string', description: 'MCP server name (optional) — enables rug-pull detection by fingerprinting the tool across runs' },
+        threshold: { type: 'number', description: 'Detection threshold (default: 40)' },
+      },
+      required: ['name'],
     },
   },
   {
@@ -221,6 +244,44 @@ function executeTool(name: string, args: Record<string, unknown>): unknown {
       }
     }
 
+    case 'scan_mcp_tool': {
+      const tool = {
+        name: String(args.name || 'unknown'),
+        description: typeof args.description === 'string' ? args.description : undefined,
+        inputSchema: (args.inputSchema && typeof args.inputSchema === 'object')
+          ? (args.inputSchema as Record<string, unknown>)
+          : undefined,
+      }
+      const result = guard.scanToolDefinition(
+        tool,
+        typeof args.threshold === 'number' ? { threshold: args.threshold } : undefined,
+      )
+
+      // Optional rug-pull detection: fingerprint the tool across runs.
+      let rugPull: { status: string; changed: boolean } | null = null
+      if (typeof args.server === 'string' && args.server) {
+        const rp = baseline.record(McpBaseline.keyFor(args.server, tool.name), tool)
+        baseline.save()
+        rugPull = { status: rp.status, changed: rp.status === 'changed' }
+      }
+
+      return {
+        tool_name: result.toolName,
+        safe: result.safe && !(rugPull?.changed),
+        score: result.score,
+        threshold: result.threshold,
+        hidden_chars: result.hiddenChars,
+        rug_pull: rugPull,
+        findings: result.findings.map(f => ({
+          id: f.id,
+          name: f.name,
+          category: f.category,
+          score: f.score,
+          source: f.source,
+        })),
+      }
+    }
+
     case 'security_status': {
       return {
         mode: guard.config.mode,
@@ -229,7 +290,8 @@ function executeTool(name: string, args: Record<string, unknown>): unknown {
         layers: guard.config.layers,
         capabilities: [
           'command_safety_check (17 dangerous patterns)',
-          'prompt_injection_detection (32+ rules, zh+en)',
+          'prompt_injection_detection (37+ rules, zh+en)',
+          'mcp_tool_poisoning_scan (description + schema)',
           'pii_detection (CN ID/phone/bank + global)',
           'path_protection (12 protected patterns)',
           'tool_policy (block payment/transfer)',

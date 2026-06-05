@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-06-05
+
+### Added
+- **MCP tool-poisoning scanner** (`scanToolDefinition` / `scan_mcp_tool` MCP tool): detects hidden instructions, invisible characters, concealment ("don't tell the user"), sensitive-file access and exfiltration hints in an MCP tool's description/parameters
+- **MCP rug-pull detection** (`McpBaseline`): fingerprints each tool's description+schema and flags silent changes across runs (`SHELLWARD_BASELINE_PATH` to relocate the store)
+- **`/scan-mcp` command + MCP client** (`mcp-client.ts`): discovers configured MCP servers and scans them live — **stdio and remote Streamable-HTTP** (incl. SSE responses + session headers), zero dependencies
+- **Custom rules** (`customRules` in `ShellWardConfig`): additive `blockedTools` / `sensitiveTools` / `outboundTools` / `honeypotPaths` / `sensitivePatterns` / `dangerousCommands` / `injectionRules`, plus `allowedTools` that always wins; invalid user regexes are skipped, never throw
+- **Detection benchmark** (`bench/`, `npm run bench`): labeled corpus (attacks + hard negatives + documented bypasses) reporting precision/recall/F1; CI regression gate (`--ci`)
+- **ReDoS audit** (`test-redos.ts`, in CI): adversarial-input timing budget for every detector
+- Unicode tag-character and variation-selector detection in hidden-char scanning
+- Startup nudge to run `/scan-mcp` when MCP servers are configured
+
+### Changed
+- **Default `injectionThreshold` 60 → 40** — the benchmark showed 60 missed most single-signal attacks (injection recall 37.5% → 100%). More aggressive blocking; revert via config or `SHELLWARD_THRESHOLD`
+- Injection rules 32 → 37 (20 ZH + 17 EN); fixed several intervening-word / reversed-order / word-boundary bugs
+- Command + injection inputs are normalized before matching (empty-quote de-obfuscation, zero-width stripping)
+- L5 Security Gate now delegates outbound DLP to the single L7 path (no divergence)
+
+### Fixed
+- **ReDoS**: `splitCommands` (catastrophic backtracking on whitespace floods) and `zh_mixed_lang_injection` (unbounded `.*`)
+- **PII false positives**: `phone_cn` restricted to real carrier segments; `bank_card_cn` narrowed to UnionPay (no longer mislabels Visa/Mastercard)
+- `SECURITY.md` corrected (no false "no network calls" claim; supported versions; ReDoS claim now CI-verified)
+
 ## [0.5.16] - 2026-04-15
 
 ### Added

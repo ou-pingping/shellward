@@ -16,6 +16,41 @@ export interface ShellWardConfig {
     sessionGuard: boolean
   }
   injectionThreshold: number
+  /** User-supplied rules merged on top of the built-ins (additive; allowedTools wins). */
+  customRules?: CustomRules
+}
+
+/** A user-defined PII/secret pattern (regex source as a string for JSON-friendliness). */
+export interface CustomSensitivePattern {
+  id: string
+  name: string
+  pattern: string
+  flags?: string
+  replacement?: string
+}
+
+/** A user-defined dangerous-command pattern. */
+export interface CustomCommandRule {
+  id: string
+  pattern: string
+  flags?: string
+  description?: string
+}
+
+/**
+ * Extension points for any platform embedding ShellWard. All fields are optional
+ * and ADDITIVE on top of the built-in rules — except `allowedTools`, which always
+ * wins (a tool listed there is never blocked and is treated as low-risk).
+ */
+export interface CustomRules {
+  blockedTools?: string[]
+  allowedTools?: string[]
+  sensitiveTools?: string[]
+  outboundTools?: string[]
+  honeypotPaths?: string[]
+  sensitivePatterns?: CustomSensitivePattern[]
+  dangerousCommands?: CustomCommandRule[]
+  injectionRules?: InjectionRule[]
 }
 
 export type ResolvedLocale = 'zh' | 'en'
@@ -80,7 +115,9 @@ export const DEFAULT_CONFIG: ShellWardConfig = {
     dataFlowGuard: true,
     sessionGuard: true,
   },
-  injectionThreshold: 60,
+  // 40 catches single high-confidence signals (one strong rule = a block) while
+  // keeping benign "act as…"-style phrasing (≤35) safe. Calibrated against bench/.
+  injectionThreshold: 40,
 }
 
 /**

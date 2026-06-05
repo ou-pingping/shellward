@@ -4,8 +4,8 @@
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.3.x   | :white_check_mark: |
-| < 0.3   | :x:                |
+| 0.5.x   | :white_check_mark: |
+| < 0.5   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -39,7 +39,10 @@ We credit all reporters in our CHANGELOG (unless you prefer to remain anonymous)
 
 ShellWard itself is a security tool. We hold ourselves to a high standard:
 
-- Zero external dependencies (reduced supply chain risk)
-- All regex patterns reviewed for ReDoS resistance
+- Zero external runtime dependencies (reduced supply chain risk)
+- All regex patterns guarded against ReDoS by an automated audit (`npm run test:redos`, run in CI) that feeds adversarial inputs and enforces a per-detector time budget
 - Audit log permissions restricted to owner-only (0600)
-- No network calls — all detection is local
+- **Detection is fully local** — command/injection/PII/tool-poisoning checks make no network calls.
+  The only outbound requests are the optional update & vulnerability-DB checks
+  (`checkForUpdate`, `fetchVulnDB`); disable them by setting `autoCheckOnStartup: false`.
+- A release pipeline (`.github/workflows/release.yml`) is configured to publish to npm with [provenance](https://docs.npmjs.com/generating-provenance-statements) (SLSA build attestation); it activates once the repository's `NPM_TOKEN` secret is set

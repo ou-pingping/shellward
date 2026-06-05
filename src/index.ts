@@ -7,6 +7,9 @@
 // See docs/定位.md — ShellWard is an AI Agent Security Layer,
 // NOT just an OpenClaw plugin. The core engine is platform-agnostic.
 
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
 import { ShellWard } from './core/engine.js'
 import { setupPromptGuard } from './layers/prompt-guard.js'
 import { setupOutputScanner } from './layers/output-scanner.js'
@@ -20,12 +23,29 @@ import { registerAllCommands } from './commands/index.js'
 import { checkForUpdate } from './update-check.js'
 import { runAutoCheckOnStartup } from './auto-check.js'
 
-const CURRENT_VERSION = '0.5.16'
+// Single source of truth: read version from package.json at load time.
+// dist/index.js → ../package.json (package.json is shipped via "files").
+const CURRENT_VERSION: string = (() => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const pkg = JSON.parse(readFileSync(join(here, '../package.json'), 'utf8'))
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+})()
 
 // Re-export core engine for SDK usage
 export { ShellWard } from './core/engine.js'
-export type { CheckResult, ScanResult, InjectionResult, ResponseCheckResult } from './core/engine.js'
-export type { ShellWardConfig } from './types.js'
+export type {
+  CheckResult, ScanResult, InjectionResult, ResponseCheckResult,
+  McpToolDefinition, ToolPoisoningResult, ToolPoisoningFinding,
+} from './core/engine.js'
+export { McpBaseline } from './mcp-baseline.js'
+export type { RugPullResult, RugPullStatus } from './mcp-baseline.js'
+export type {
+  ShellWardConfig, CustomRules, CustomSensitivePattern, CustomCommandRule,
+} from './types.js'
 
 /**
  * Wrap api.on so every hook handler gets try-catch protection.
@@ -120,8 +140,8 @@ export default {
 
     // === Slash Commands ===
     if (api.registerCommand) {
-      registerAllCommands(api, guard.config)
-      api.logger.info('[ShellWard] 6 commands registered')
+      const commandCount = registerAllCommands(api, guard.config)
+      api.logger.info(`[ShellWard] ${commandCount} commands registered`)
     }
 
     const allLayers = ['promptGuard', 'outputScanner', 'toolBlocker', 'inputAuditor', 'securityGate', 'outboundGuard', 'dataFlowGuard', 'sessionGuard']

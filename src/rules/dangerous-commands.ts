@@ -5,7 +5,8 @@ import type { DangerousCommandRule } from '../types.js'
 export const DANGEROUS_COMMANDS: DangerousCommandRule[] = [
   {
     id: 'rm_rf_root',
-    pattern: /rm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+-[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*\s+-[a-zA-Z]*r|-[a-zA-Z]*rf[a-zA-Z]*)\s+[\/~]/i,
+    // Match -rf / -fr (combined, either order) and the two-flag forms, then a path.
+    pattern: /rm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+-[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*\s+-[a-zA-Z]*r|-[a-zA-Z]*(?:rf|fr)[a-zA-Z]*)\s+[\/~]/i,
     description_zh: '递归强制删除根目录或用户目录',
     description_en: 'Recursive force delete on root or home directory',
   },
@@ -113,5 +114,8 @@ export const DANGEROUS_COMMANDS: DangerousCommandRule[] = [
  * - Trim whitespace
  */
 export function splitCommands(cmd: string): string[] {
-  return cmd.split(/\s*(?:;|&&|\|\||[\r\n]+)\s*/).filter(Boolean)
+  // Split on separators only, then trim in JS. The previous `\s*(...)\s*` form
+  // backtracked catastrophically on long whitespace runs (ReDoS) — splitting
+  // without the surrounding `\s*` is linear.
+  return cmd.split(/(?:;|&&|\|\||[\r\n]+)/).map(s => s.trim()).filter(Boolean)
 }

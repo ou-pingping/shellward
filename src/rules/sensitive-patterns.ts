@@ -80,13 +80,19 @@ export const SENSITIVE_PATTERNS: SensitivePattern[] = [
   {
     id: 'phone_cn',
     name: '手机号 / CN Phone',
-    regex: /(?<!\d)1[3-9]\d{9}(?!\d)/g,
+    // Restrict the 2nd–3rd digits to real CN carrier segment allocations so
+    // arbitrary 11-digit numbers (order IDs, timestamps) don't false-positive.
+    // 13x · 14[falsey skip 2/3] · 15x(skip 4) · 16[2567] · 17x · 18x · 19x(skip 4)
+    regex: /(?<!\d)1(?:3\d|4[01456789]|5[0-35-9]|6[2567]|7[0-8]|8\d|9[0-35-9])\d{8}(?!\d)/g,
     replacement: '[REDACTED:手机号]',
   },
   {
     id: 'bank_card_cn',
-    name: '银行卡号 / CN Bank Card',
-    regex: /(?<!\d)(?:62|4|5[1-5])\d{14,17}(?!\d)/g,
+    name: '银行卡号 / CN UnionPay Card',
+    // UnionPay-only (BIN 62). Visa (4xxx) / Mastercard (5[1-5]xx) are handled by
+    // the `credit_card` rule — keeping them out of here removes the double-match
+    // that mislabeled international cards as CN bank cards.
+    regex: /(?<!\d)62\d{14,17}(?!\d)/g,
     replacement: '[REDACTED:银行卡号]',
     validate: validateLuhn,
   },
@@ -135,13 +141,39 @@ export function scanForSensitive(text: string): ScanMatch[] {
 }
 
 /**
- * Redact all sensitive data in text. Returns [redactedText, findings[]]
+ * Compile user-supplied pattern strings into SensitivePattern objects.
+ * Invalid regexes are skipped (never throws). The global flag is always added.
  */
-export function redactSensitive(text: string): [string, { id: string; name: string; count: number }[]] {
+export function compileSensitivePatterns(
+  patterns: { id: string; name: string; pattern: string; flags?: string; replacement?: string }[],
+): SensitivePattern[] {
+  const out: SensitivePattern[] = []
+  for (const p of patterns || []) {
+    try {
+      const flags = (p.flags || '').includes('g') ? p.flags! : `${p.flags || ''}g`
+      out.push({
+        id: p.id,
+        name: p.name,
+        regex: new RegExp(p.pattern, flags),
+        replacement: p.replacement ?? `[REDACTED:${p.name}]`,
+      })
+    } catch { /* skip invalid pattern */ }
+  }
+  return out
+}
+
+/**
+ * Redact all sensitive data in text. Returns [redactedText, findings[]]
+ * @param extra additional patterns merged after the built-ins
+ */
+export function redactSensitive(
+  text: string,
+  extra: SensitivePattern[] = [],
+): [string, { id: string; name: string; count: number }[]] {
   let result = text
   const findings: { id: string; name: string; count: number }[] = []
 
-  for (const pat of SENSITIVE_PATTERNS) {
+  for (const pat of [...SENSITIVE_PATTERNS, ...extra]) {
     const regex = new RegExp(pat.regex.source, pat.regex.flags)
     let count = 0
     result = result.replace(regex, (match) => {

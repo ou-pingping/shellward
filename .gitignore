@@ -21,6 +21,10 @@ Thumbs.db
 .env
 .env.*
 
+# Secrets / registry publish tokens (never commit)
+.mcpregistry_*
+*_token
+
 # npm
 .npm/
 package-lock.json
@@ -41,3 +45,6 @@ promo/
 awesome-llm-security/
 *.mp4
 docs/
+
+# Agent worktrees
+.claude/

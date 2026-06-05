@@ -24,8 +24,25 @@ export const INJECTION_RULES_EN: InjectionRule[] = [
     name: 'System prompt extraction',
     pattern: '(?:output|print|show|reveal|display|repeat|leak|dump)\\s+(?:your\\s+)?(?:system|initial|original|full)?\\s*(?:prompt|instructions?|rules?|guidelines?)',
     flags: 'i',
-    riskScore: 30,
+    // High-confidence single signal — legit users rarely ask to dump the prompt.
+    riskScore: 40,
     category: 'exfiltration',
+  },
+  {
+    id: 'en_disregard',
+    name: 'Disregard prior context',
+    pattern: 'disregard\\s+(?:the\\s+)?(?:above|previous|prior|earlier|preceding|all|these|those)',
+    flags: 'i',
+    riskScore: 40,
+    category: 'override',
+  },
+  {
+    id: 'en_no_guidelines',
+    name: 'Operate without guidelines',
+    pattern: '(?:no|without|free\\s+of|free\\s+from)\\s+(?:ethical\\s+|content\\s+|safety\\s+)?(?:guidelines?|content\\s+policy|restrictions?|filters?|guardrails?|limitations?)',
+    flags: 'i',
+    riskScore: 30,
+    category: 'override',
   },
   {
     id: 'en_developer_mode',
@@ -38,10 +55,18 @@ export const INJECTION_RULES_EN: InjectionRule[] = [
   {
     id: 'en_no_restriction',
     name: 'Remove restrictions',
-    pattern: '(?:remove|disable|turn\\s+off|bypass|ignore|skip|override|circumvent)\\s+(?:all\\s+)?(?:restrictions?|constraints?|safety|filters?|guardrails?|limitations?|safeguards?)',
+    pattern: '(?:remove|disable|turn\\s+off|bypass|ignore|skip|override|circumvent)\\s+(?:all\\s+|your\\s+|the\\s+)?(?:safety\\s+|content\\s+)?(?:restrictions?|constraints?|safety|filters?|guardrails?|limitations?|safeguards?|guidelines?|rules?|policy)',
     flags: 'i',
     riskScore: 40,
     category: 'override',
+  },
+  {
+    id: 'en_new_instructions',
+    name: 'New/updated instructions marker',
+    pattern: '(?:^|[\\n.])\\s*(?:new|updated|revised|additional|important)\\s+instructions?\\b',
+    flags: 'i',
+    riskScore: 30,
+    category: 'injection',
   },
   {
     id: 'en_do_anything',

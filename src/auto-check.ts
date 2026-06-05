@@ -6,6 +6,7 @@ import { existsSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { getHomeDir } from './utils.js'
 import { fetchVulnDB, compareVersions } from './update-check.js'
+import { discoverMcpServers } from './mcp-client.js'
 
 const OPENCLAW_DIR = join(getHomeDir(), '.openclaw')
 
@@ -13,6 +14,7 @@ export interface AutoCheckResult {
   openclawVulns: { id: string; severity: string; description: string }[]
   pluginRisks: { plugin: string; risk: string }[]
   mcpRisks: { config: string; risk: string }[]
+  mcpServerCount: number
   rootWarning: boolean
 }
 
@@ -131,7 +133,9 @@ export async function runAutoCheck(locale: 'zh' | 'en' = 'en'): Promise<AutoChec
     Promise.resolve(scanMcpConfig()),
   ])
   const rootWarning = typeof process.getuid === 'function' && process.getuid() === 0
-  return { openclawVulns, pluginRisks, mcpRisks, rootWarning }
+  let mcpServerCount = 0
+  try { mcpServerCount = discoverMcpServers().filter(s => s.transport === 'stdio').length } catch { /* ignore */ }
+  return { openclawVulns, pluginRisks, mcpRisks, mcpServerCount, rootWarning }
 }
 
 /**
@@ -170,6 +174,12 @@ export function runAutoCheckOnStartup(logger: { warn: (s: string) => void }, loc
 
     if (result.rootWarning) {
       lines.push(zh ? '⚠️ 正在以 root 运行，建议使用普通用户' : '⚠️ Running as root, consider using non-root user')
+    }
+
+    if (result.mcpServerCount > 0) {
+      lines.push(zh
+        ? `🔌 检测到 ${result.mcpServerCount} 个 MCP 服务器 — 运行 /scan-mcp 检测工具投毒与 rug-pull`
+        : `🔌 ${result.mcpServerCount} MCP server(s) configured — run /scan-mcp to check for tool poisoning & rug-pulls`)
     }
 
     if (lines.length > 0) {

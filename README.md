@@ -10,7 +10,7 @@
 
 [![npm](https://img.shields.io/npm/v/shellward?color=cb0000&label=npm)](https://www.npmjs.com/package/shellward)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
-[![tests](https://img.shields.io/badge/tests-123%20passing-brightgreen)](#performance)
+[![tests](https://img.shields.io/badge/tests-183%20passing-brightgreen)](#performance)
 [![deps](https://img.shields.io/badge/dependencies-0-brightgreen)](#performance)
 
 [English](#demo) | [中文](#中文)
@@ -54,7 +54,7 @@ Your AI agent has full access to tools — shell, email, HTTP, file system. One 
 
 | Platform | Integration | Note |
 |----------|------------|------|
-| **Claude Desktop** | MCP Server | Add to `claude_desktop_config.json` — 7 security tools |
+| **Claude Desktop** | MCP Server | Add to `claude_desktop_config.json` — 8 security tools |
 | **Cursor** | MCP Server | Add to `.cursor/mcp.json` |
 | **OpenClaw** | MCP + Plugin + SDK | `openclaw plugins install shellward` — adapts to available hooks |
 | **Claude Code** | MCP + SDK | Anthropic's official CLI agent |
@@ -70,8 +70,10 @@ Your AI agent has full access to tools — shell, email, HTTP, file system. One 
 
 - **8 defense layers**: prompt guard, input auditor, tool blocker, output scanner, security gate, outbound guard, data flow guard, session guard
 - **DLP model**: data returns in full (no redaction), outbound sends are blocked when PII was recently accessed
-- **PII detection**: SSN, credit cards, API keys (OpenAI/GitHub/AWS), JWT, passwords — plus Chinese ID card (GB 11643 checksum), phone, bank card (Luhn)
-- **32 injection rules**: 18 Chinese + 14 English, risk scoring, mixed-language detection
+- **PII detection**: SSN, credit cards, API keys (OpenAI/GitHub/AWS), JWT, passwords — plus Chinese ID card (GB 11643 checksum), carrier-validated mobile, UnionPay bank card (Luhn) — precision-tuned to cut false positives
+- **37 injection rules**: 20 Chinese + 17 English, risk scoring, mixed-language detection
+- **MCP tool-poisoning scan**: detects hidden instructions, invisible characters, concealment ("hide from user"), secret-file access & exfiltration hints in a tool's description/parameters
+- **MCP rug-pull detection**: fingerprints each tool's description on first sight, flags silent changes across runs
 - **Data exfiltration chain**: read sensitive data → send email / HTTP POST / curl = blocked
 - **Bash bypass detection**: catches `curl -X POST`, `wget --post`, `nc`, Python/Node network exfil
 - **Zero dependencies**, zero config, Apache-2.0
@@ -84,42 +86,32 @@ ShellWard runs as a standalone MCP server over stdio — zero dependencies, no `
 
 **Claude Desktop / Cursor / any MCP client:**
 
-Add to your MCP config (`claude_desktop_config.json`, `.cursor/mcp.json`, etc.):
+Add to your MCP config (`claude_desktop_config.json`, `.cursor/mcp.json`, OpenClaw, etc.) — no install path needed, `npx` fetches the published `shellward-mcp` bin:
 
 ```json
 {
   "mcpServers": {
     "shellward": {
       "command": "npx",
-      "args": ["tsx", "/path/to/shellward/src/mcp-server.ts"]
+      "args": ["-y", "-p", "shellward", "shellward-mcp"]
     }
   }
 }
 ```
 
-**OpenClaw:**
+If installed globally (`npm i -g shellward`), simply use `"command": "shellward-mcp"`.
 
-```json
-{
-  "mcpServers": {
-    "shellward": {
-      "command": "npx",
-      "args": ["tsx", "/path/to/shellward/src/mcp-server.ts"]
-    }
-  }
-}
-```
-
-**7 MCP tools available:**
+**8 MCP tools available:**
 
 | Tool | Description |
 |------|-------------|
 | `check_command` | Check if a shell command is safe (rm -rf, reverse shell, fork bomb...) |
-| `check_injection` | Detect prompt injection in text (32+ rules, zh+en) |
+| `check_injection` | Detect prompt injection in text (37+ rules, zh+en) |
 | `scan_data` | Scan for PII & sensitive data (CN ID/phone/bank, API keys, SSN...) |
 | `check_path` | Check if file path operation is safe (.env, .ssh, credentials...) |
 | `check_tool` | Check if tool name is allowed (blocks payment/transfer tools) |
 | `check_response` | Audit AI response for canary leaks & PII exposure |
+| `scan_mcp_tool` | Scan an MCP tool definition for poisoning + rug-pull |
 | `security_status` | Get current security config & active layers |
 
 **Environment variables:**
@@ -128,7 +120,8 @@ Add to your MCP config (`claude_desktop_config.json`, `.cursor/mcp.json`, etc.):
 |----------|--------|---------|
 | `SHELLWARD_MODE` | `enforce` / `audit` | `enforce` |
 | `SHELLWARD_LOCALE` | `auto` / `zh` / `en` | `auto` |
-| `SHELLWARD_THRESHOLD` | `0`-`100` | `60` |
+| `SHELLWARD_THRESHOLD` | `0`-`100` | `40` |
+| `SHELLWARD_BASELINE_PATH` | file path | `~/.openclaw/shellward/mcp-baseline.json` |
 
 ### As SDK (any AI agent platform):
 
@@ -174,7 +167,7 @@ User Input
   │
   ▼
 ┌───────────────────┐
-│ L4 Input Auditor  │ 32 injection rules (18 ZH + 14 EN), risk scoring
+│ L4 Input Auditor  │ 37 injection rules (20 ZH + 17 EN), risk scoring
 └───────────────────┘
   │
   ▼
@@ -240,6 +233,32 @@ password: "MyP@ssw0rd!"       → Detected (Password)
 330102199001011234              → Detected (Chinese ID Card, checksum validated)
 ```
 
+## OWASP Coverage
+
+How ShellWard maps to the **OWASP Top 10 for LLM Applications (2025)** and common **MCP** risks. Honest scope — `✅` covered, `◐` partial, `✗` out of scope.
+
+| OWASP LLM Top 10 (2025) | ShellWard | How |
+|---|:--:|---|
+| LLM01 Prompt Injection | ✅ | L1 prompt guard + L4 injection engine (32 rules, hidden-char/tag detection) |
+| LLM02 Sensitive Information Disclosure | ✅ | L2/L6 PII scan + L7 DLP exfiltration blocking |
+| LLM03 Supply Chain | ✅ | `/scan-plugins`, package-install detection, `/check-updates` CVE DB |
+| LLM04 Data & Model Poisoning | ◐ | **MCP tool-poisoning scan + rug-pull detection** (tool-definition layer) |
+| LLM05 Improper Output Handling | ✅ | L6 output scanner + canary-leak detection |
+| LLM06 Excessive Agency | ✅ | L3 tool blocker (payment/transfer), L5 security gate |
+| LLM07 System Prompt Leakage | ✅ | L1 canary token tripwire in responses |
+| LLM08 Vector & Embedding Weaknesses | ✗ | Out of scope (not a RAG/vector tool) |
+| LLM09 Misinformation | ✗ | Out of scope |
+| LLM10 Unbounded Consumption | ◐ | Fork-bomb / resource-exhaustion command blocking |
+
+| Common MCP risk | ShellWard | How |
+|---|:--:|---|
+| Tool Poisoning (hidden instructions in tool metadata) | ✅ | `scan_mcp_tool` / `/scan-mcp` |
+| Rug Pull (tool silently redefined after approval) | ✅ | description+schema fingerprint baseline |
+| Data exfiltration via tools | ✅ | L7 outbound guard (email/HTTP/curl/bash) |
+| Command injection via MCP | ✅ | `check_command` (17 dangerous patterns) |
+| Sensitive-file access | ✅ | `check_path` + honeypot tripwires |
+| Tool Shadowing / cross-server escalation | ◐ | Per-tool scan; cross-server graph analysis not yet |
+
 ## Configuration
 
 ```json
@@ -250,7 +269,30 @@ password: "MyP@ssw0rd!"       → Detected (Password)
 |--------|--------|---------|-------------|
 | `mode` | `enforce` / `audit` | `enforce` | Block + log, or log only |
 | `locale` | `auto` / `zh` / `en` | `auto` | Auto-detects from system LANG |
-| `injectionThreshold` | `0`-`100` | `60` | Risk score threshold for injection detection |
+| `injectionThreshold` | `0`-`100` | `40` | Risk score threshold (lower = stricter; calibrated via bench/) |
+
+### Custom Rules (SDK)
+
+Extend the built-in rules without forking — every field is additive, except `allowedTools` which always wins:
+
+```typescript
+const guard = new ShellWard({
+  customRules: {
+    blockedTools: ['internal_payout', 'wire_transfer'],   // add to the block policy
+    allowedTools: ['payment'],                            // trust a tool (overrides built-in block)
+    sensitivePatterns: [                                  // org-specific PII / secrets
+      { id: 'emp_id', name: 'Employee ID', pattern: 'EMP-\\d{6}' },
+    ],
+    dangerousCommands: [                                  // extra command blocklist
+      { id: 'no_shutdown', pattern: 'shutdown\\s+-h', description: 'Power-off' },
+    ],
+    honeypotPaths: ['secret_vault\\.dat$'],               // extra honeypot tripwires
+    injectionRules: [/* custom InjectionRule[] */],
+  },
+})
+```
+
+Invalid regexes are skipped (never throws), so user input can't break the guard.
 
 ## Commands (OpenClaw)
 
@@ -260,6 +302,7 @@ password: "MyP@ssw0rd!"       → Detected (Password)
 | `/audit [n] [filter]` | View audit log (filter: block, audit, critical, high) |
 | `/harden` | Scan & fix security issues |
 | `/scan-plugins` | Scan installed plugins for malicious code |
+| `/scan-mcp` | Scan configured MCP servers (stdio + remote HTTP) for tool poisoning + rug-pull |
 | `/check-updates` | Check versions & known CVEs (17 built-in) |
 
 ## Performance
@@ -270,7 +313,24 @@ password: "MyP@ssw0rd!"       → Detected (Password)
 | Command check throughput | 125,000/sec |
 | Injection detection throughput | ~7,700/sec |
 | Dependencies | 0 |
-| Tests | 123 passing (incl. 11 MCP) |
+| Tests | 183 passing (incl. 15 MCP + 12 ReDoS + live tool-poisoning scan) |
+
+## Detection Benchmark
+
+Effectiveness is measured, not asserted. `npm run bench` runs every detector over a labeled corpus (attacks **and** hard negatives — benign text that looks suspicious) and reports precision/recall/F1. The corpus and harness live in [`bench/`](./bench); CI fails on regression.
+
+| Category | Precision | Recall | F1 |
+|----------|:---------:|:------:|:--:|
+| Prompt injection | 100% | 100% | 100% |
+| Dangerous commands | 100% | 100% | 100% |
+| PII / secrets | 100% | 100% | 100% |
+| MCP tool poisoning | 100% | 100% | 100% |
+
+83 gated samples (attacks + hard negatives). Zero-width-interleaved and empty-quote (`r''m`) obfuscation are normalized before matching. The corpus also tracks **5 documented bypasses** (leetspeak, base64, non-zh/en languages, shell variable indirection) that regex/heuristics are not expected to catch — listed explicitly and excluded from the gate rather than hidden.
+
+> Numbers are on the current in-repo corpus — a floor, not a universal guarantee. Found a bypass? Add it to `bench/corpus.ts` as a labeled row and the gap becomes measurable (and CI-enforced).
+>
+> **Conservative by design:** in enforce mode ShellWard fails safe — e.g. `echo "rm -rf /"` (printing a literal) is flagged, since regex can't distinguish it from `echo "$(rm -rf /)"` (which executes).
 
 ## Vulnerability Database
 
@@ -298,7 +358,7 @@ ShellWard is built for teams that need runtime security for AI agents — whethe
 | **Zero dependencies** | ✅ (npm) | ✅ | Go binary | Cloud API | Python |
 | **Runtime blocking** | ✅ | ✅ | ✅ (proxy) | ✅ | ❌ (scanner) |
 | **Architecture** | In-process middleware | Hook-based guard | HTTP proxy | Hook + cloud | Scan + monitor |
-| **Detection rules** | 32 | 24 | 36 DLP patterns | 200+ YAML | 191+ |
+| **Detection rules** | 37 | 24 | 36 DLP patterns | 200+ YAML | 191+ |
 
 > ShellWard is the only tool with **DLP-style data flow tracking** + **Chinese language security** + **zero dependencies** in a single package.
 >
@@ -324,7 +384,7 @@ ShellWard is built for teams that need runtime security for AI agents — whethe
 
 | 平台 | 集成方式 | 说明 |
 |------|---------|------|
-| **Claude Desktop** | MCP 服务器 | 添加到 `claude_desktop_config.json`，7 个安全工具 |
+| **Claude Desktop** | MCP 服务器 | 添加到 `claude_desktop_config.json`，8 个安全工具 |
 | **Cursor** | MCP 服务器 | 添加到 `.cursor/mcp.json` |
 | **OpenClaw** | MCP + 插件 + SDK | `openclaw plugins install shellward`，开箱即用 |
 | **Claude Code** | MCP + SDK | Anthropic 官方 CLI Agent |
@@ -340,20 +400,22 @@ ShellWard is built for teams that need runtime security for AI agents — whethe
 
 **MCP 服务器模式（推荐）：**
 
-在 MCP 配置中添加（适用于 Claude Desktop、Cursor、OpenClaw 等）：
+在 MCP 配置中添加（适用于 Claude Desktop、Cursor、OpenClaw 等）。无需本地路径，`npx` 会拉取已发布的 `shellward-mcp`：
 
 ```json
 {
   "mcpServers": {
     "shellward": {
       "command": "npx",
-      "args": ["tsx", "/path/to/shellward/src/mcp-server.ts"]
+      "args": ["-y", "-p", "shellward", "shellward-mcp"]
     }
   }
 }
 ```
 
-零依赖，原生实现 MCP 协议。提供 7 个安全工具：命令检查、注入检测、敏感数据扫描、路径保护、工具策略、响应审计、安全状态。
+若已全局安装（`npm i -g shellward`），直接用 `"command": "shellward-mcp"` 即可。
+
+零依赖，原生实现 MCP 协议。提供 8 个安全工具：命令检查、注入检测、敏感数据扫描、路径保护、工具策略、响应审计、**MCP 工具投毒/rug-pull 扫描**、安全状态。
 
 **OpenClaw 插件模式：**
 
@@ -382,6 +444,8 @@ guard.checkOutbound('send_email', {...})  // → { allowed: false } (读过敏�
 - **DLP 模型**：数据完整返回（不脱敏），外部发送才拦截 — 用户体验零影响
 - **中文 PII**：身份证号（GB 11643 校验位）、手机号（全运营商）、银行卡号（Luhn 校验）
 - **中文注入检测**：18 条中文规则 + 14 条英文规则，支持中英混合攻击检测
+- **MCP 工具投毒扫描**：检测工具描述/参数里的隐藏指令、不可见字符、"对用户隐瞒" 类隐蔽指令、敏感文件访问与外泄提示
+- **MCP rug-pull 检测**：首次见到工具时记录描述指纹，后续被偷改即告警（`/scan-mcp` 一键扫描已配置 MCP 服务器）
 - **数据外泄链**：读敏感数据 → send_email / HTTP POST / curl 外发 = 拦截
 - **零依赖**、零配置、Apache-2.0
 
@@ -396,7 +460,7 @@ guard.checkOutbound('send_email', {...})  // → { allowed: false } (读过敏�
 | **零依赖** | ✅ (npm) | ✅ | Go 二进制 | 需云 API | 需 Python |
 | **运行时拦截** | ✅ | ✅ | ✅ (proxy) | ✅ | ❌ (扫描器) |
 | **架构** | 进程内中间件 | Hook 守护 | HTTP 代理 | Hook + 云端 | 扫描 + 监控 |
-| **检测规则数** | 32 | 24 | 36 DLP 模式 | 200+ YAML | 191+ |
+| **检测规则数** | 37 | 24 | 36 DLP 模式 | 200+ YAML | 191+ |
 
 > ShellWard 是唯一同时具备 **DLP 数据流追踪** + **中文语言安全** + **零依赖** 的 AI Agent 安全工具。
 >
